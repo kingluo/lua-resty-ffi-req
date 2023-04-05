@@ -25,7 +25,7 @@ function _M.post()
     local client, err = req:new_client()
     local ok, res = client:request{
         method = req.HTTP_POST,
-        url = "http://httpbin.local/anything?foo=bar",
+        url = "http://httpbin.local/anything",
         body = coroutine.wrap(function()
             coroutine.yield("hello")
         end),
@@ -39,7 +39,7 @@ function _M.body_reader()
     local client, err = req:new_client()
     local ok, res = client:request{
         method = req.HTTP_POST,
-        url = "http://httpbin.local/anything?foo=bar",
+        url = "http://httpbin.local/anything",
         body = coroutine.wrap(function()
             coroutine.yield("hello")
         end),
@@ -79,7 +79,7 @@ function _M.benchmark_get()
         --ngx.say(inspect(res))
         --ngx.flush()
         --ngx.sleep(0.1)
-        assert(ok and res.status == 200)
+        assert(ok and res.status == 200 and res.body == "ok")
     end
     ngx.update_time()
     local t2 = ngx.now()
@@ -99,7 +99,7 @@ function _M.benchmark_get()
         local res, err = httpc:request_uri(url, {ssl_verify=false})
         --ngx.say(inspect(res))
         --ngx.say(inspect(err))
-        assert(err == nil and res.status == 200)
+        assert(err == nil and res.status == 200 and res.body == "ok")
     end
     ngx.update_time()
     local t2 = ngx.now()
