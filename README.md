@@ -6,6 +6,10 @@ It encapsulates golang [req](https://req.cool/) library.
 
 ## Background
 
+Check this blog for more detail:
+
+http://luajit.io/posts/http3-client-for-openresty
+
 HTTP2/HTTP3 protocol is popular now,
 but OpenResty does not support them.
 
