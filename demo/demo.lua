@@ -7,7 +7,7 @@ local _M = {}
 function _M.get()
     local client, err = req:new_client()
     local ok, res = client:request{
-        url = "http://httpbin.local/anything?foo=bar",
+        url = "http://httpbin.org/anything?foo=bar",
         body = "hello",
         args = {
             foo1 = "foo1",
@@ -25,7 +25,7 @@ function _M.post()
     local client, err = req:new_client()
     local ok, res = client:request{
         method = req.HTTP_POST,
-        url = "http://httpbin.local/anything",
+        url = "http://httpbin.org/anything",
         body = coroutine.wrap(function()
             coroutine.yield("hello")
         end),
@@ -39,7 +39,7 @@ function _M.body_reader()
     local client, err = req:new_client()
     local ok, res = client:request{
         method = req.HTTP_POST,
-        url = "http://httpbin.local/anything",
+        url = "http://httpbin.org/anything",
         body = coroutine.wrap(function()
             coroutine.yield("hello")
         end),
