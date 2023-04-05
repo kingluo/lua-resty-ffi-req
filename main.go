@@ -44,13 +44,17 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
-	"time"
+
 	"unsafe"
 
-	//"github.com/goccy/go-json"
-	"encoding/json"
+	//_ "net/http/pprof"
+
+	"github.com/cristalhq/base64"
 	"github.com/imroc/req/v3"
+	jsoniter "github.com/json-iterator/go"
 )
+
+var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 const (
 	NEW_CLIENT uint = iota
@@ -84,15 +88,25 @@ type Request struct {
 	Files      *map[string]string      `json:"files"`
 }
 
+type ClientConfig struct {
+	Version            *uint    `json:"version"`
+	Workers            *uint    `json:"workers"`
+	MaxConnsPerHost    *int     `json:"max_conns_per_host"`
+	MaxIdleConns       *int     `json:"max_idle_conns"`
+	DisableCompression *bool    `json:"disable_compression"`
+	DisableHTTP3       *bool    `json:"disable_http3"`
+	DisableH2C         *bool    `json:"disable_h2c"`
+	SSLVerify          []string `json:"ssl_verify"`
+	SSLServerName      *string  `json:"ssl_server_name"`
+}
+
 type Command struct {
-	task            unsafe.Pointer `json:"-"`
-	Cmd             uint           `json:"cmd"`
-	Version         *int           `json:"version"`
-	Client          *uint64        `json:"client"`
-	ReqId           *uint64        `json:"req_id"`
-	Req             *Request       `json:"req"`
-	ssl_verify      []string       `json:"ssl_verify"`
-	ssl_server_name *string        `json:"ssl_server_name"`
+	task         unsafe.Pointer `json:"-"`
+	Cmd          uint           `json:"cmd"`
+	Client       *uint64        `json:"client"`
+	ReqId        *uint64        `json:"req_id"`
+	ClientConfig *ClientConfig  `json:"client_config"`
+	Req          *Request       `json:"req"`
 }
 
 type Response struct {
@@ -103,6 +117,7 @@ type Response struct {
 	Body       *string     `json:"body,omitempty"`
 	ReqId      *uint64     `json:"req_id,omitempty"`
 	Trailer    http.Header `json:"trailer,omitempty"`
+	TLSVersion *uint16     `json:"tls_version,omitempty"`
 }
 
 type BodyCtx struct {
@@ -145,6 +160,7 @@ func sendReq(r *req.Request, cmd *Command, client *Client, ctx *BodyCtx) {
 	var rc C.int
 	var data interface{}
 	if err != nil {
+		log.Printf("%+v\n", err)
 		rc = 1
 		data = err
 	} else {
@@ -154,6 +170,9 @@ func sendReq(r *req.Request, cmd *Command, client *Client, ctx *BodyCtx) {
 			ProtoMinor: resp.ProtoMinor,
 			Headers:    resp.Header,
 			Trailer:    resp.Trailer,
+		}
+		if resp.TLS != nil {
+			rsp.TLSVersion = &resp.TLS.Version
 		}
 		data = rsp
 		if cmd.Req.BodyReader {
@@ -202,8 +221,12 @@ func sendReq(r *req.Request, cmd *Command, client *Client, ctx *BodyCtx) {
 				}
 			}()
 		} else {
-			body := resp.String()
-			rsp.Body = &body
+			body, err := resp.ToBytes()
+			if err != nil {
+				log.Fatal(err)
+			}
+			str := base64.StdEncoding.EncodeToString(body)
+			rsp.Body = &str
 		}
 	}
 	rsp, err := json.Marshal(data)
@@ -221,60 +244,53 @@ func reply(rc C.int, rsp []byte, cmd *Command) {
 	}
 }
 
-func request(client *Client) {
-	timer := time.NewTimer(10 * time.Second)
-request_loop:
-	for {
-		select {
-		case cmd, ok := <-client.reqCh:
-			if !ok {
-				break request_loop
-			}
-			timer.Reset(10 * time.Second)
-			r := client.R()
+func handle_request(client *Client, cmd *Command) {
+	r := client.R()
 
-			if cmd.Req.Args != nil {
-				r.SetQueryParamsAnyType(*cmd.Req.Args)
-			}
+	if cmd.Req.Args != nil {
+		r.SetQueryParamsAnyType(*cmd.Req.Args)
+	}
 
-			if cmd.Req.BodyReader {
-				r.DisableAutoReadResponse()
-			}
+	if cmd.Req.BodyReader {
+		r.DisableAutoReadResponse()
+	}
 
-			if !cmd.Req.BodyWriter {
-				if cmd.Req.Body != nil {
-					r.SetBody(*cmd.Req.Body)
-				} else {
-					if cmd.Req.Form != nil {
-						r.SetFormDataAnyType(*cmd.Req.Form)
-					}
-					if cmd.Req.Files != nil {
-						r.SetFiles(*cmd.Req.Files)
-					}
-				}
-				sendReq(r, cmd, client, nil)
-			} else {
-				var bodyCtx *BodyCtx
-				reqR, reqW := io.Pipe()
-				r.SetBody(reqR)
-				id := client.req_id.Add(1)
-				bodyCtx = &BodyCtx{id: id, reqWriter: reqW, cmd: cmd}
-				client.reqs.Store(id, bodyCtx)
-				data := strconv.FormatUint(id, 10)
-				reply(0, []byte(data), cmd)
-
-				cmd.task = nil
-				sendReq(r, cmd, client, bodyCtx)
+	if !cmd.Req.BodyWriter {
+		if cmd.Req.Body != nil {
+			r.SetBody(*cmd.Req.Body)
+		} else {
+			if cmd.Req.Form != nil {
+				r.SetFormDataAnyType(*cmd.Req.Form)
 			}
-		case <-timer.C:
-			log.Println("expired worker")
-			break request_loop
+			if cmd.Req.Files != nil {
+				r.SetFiles(*cmd.Req.Files)
+			}
 		}
+		sendReq(r, cmd, client, nil)
+	} else {
+		var bodyCtx *BodyCtx
+		reqR, reqW := io.Pipe()
+		r.SetBody(reqR)
+		id := client.req_id.Add(1)
+		bodyCtx = &BodyCtx{id: id, reqWriter: reqW, cmd: cmd}
+		client.reqs.Store(id, bodyCtx)
+		data := strconv.FormatUint(id, 10)
+		reply(0, []byte(data), cmd)
+
+		cmd.task = nil
+		sendReq(r, cmd, client, bodyCtx)
+	}
+}
+
+func request(client *Client) {
+	for cmd := range client.reqCh {
+		handle_request(client, cmd)
 	}
 }
 
 //export libffi_init
 func libffi_init(_ *C.char, tq unsafe.Pointer) C.int {
+	//go http.ListenAndServe("localhost:6060", nil)
 	go func() {
 		var client_idx uint64
 		clients := make(map[uint64]*Client)
@@ -295,35 +311,71 @@ func libffi_init(_ *C.char, tq unsafe.Pointer) C.int {
 			}
 			cmd.task = task
 
+			//log.Printf("%+v\n", cmd)
 			switch cmd.Cmd {
 			case NEW_CLIENT:
 				client_idx += 1
-				cli := req.C().EnableHTTP3()
-				if cmd.ssl_verify != nil {
-					cli.DisableInsecureSkipVerify()
-					certPool, err := x509.SystemCertPool()
-					if err != nil {
-						log.Fatal(err)
+				cli := req.C().EnableHTTP3().EnableInsecureSkipVerify()
+				var nWorkers uint = 10
+				if cmd.ClientConfig != nil {
+					cfg := cmd.ClientConfig
+					if cfg.Version != nil {
+						switch *cfg.Version {
+						case 1:
+							cli.EnableForceHTTP1()
+						case 2:
+							cli.EnableForceHTTP2()
+						case 3:
+							cli.EnableForceHTTP3()
+						}
 					}
-					for _, f := range cmd.ssl_verify {
-						caCertRaw, err := os.ReadFile(f)
+					if cfg.SSLVerify != nil {
+						//cli.DisableInsecureSkipVerify()
+						certPool, err := x509.SystemCertPool()
 						if err != nil {
-							panic(err)
+							log.Fatal(err)
 						}
-						if ok := certPool.AppendCertsFromPEM(caCertRaw); !ok {
-							panic("Could not add root ceritificate to pool.")
+						for _, f := range cfg.SSLVerify {
+							caCertRaw, err := os.ReadFile(f)
+							if err != nil {
+								panic(err)
+							}
+							if ok := certPool.AppendCertsFromPEM(caCertRaw); !ok {
+								panic("Could not add root ceritificate to pool.")
+							}
 						}
+						cfg := cli.GetTLSClientConfig()
+						cfg.RootCAs = certPool
 					}
-					cfg := cli.GetTLSClientConfig()
-					cfg.RootCAs = certPool
-				}
-				if cmd.ssl_server_name != nil {
-					cfg := cli.GetTLSClientConfig()
-					cfg.ServerName = *cmd.ssl_server_name
+					if cfg.SSLServerName != nil {
+						tlsCfg := cli.GetTLSClientConfig()
+						tlsCfg.ServerName = *cfg.SSLServerName
+					}
+					if cfg.Workers != nil {
+						nWorkers = *cfg.Workers
+					}
+					if cfg.MaxIdleConns != nil {
+						cli.GetTransport().SetMaxIdleConns(*cfg.MaxIdleConns)
+					}
+					if cfg.MaxConnsPerHost != nil {
+						cli.GetTransport().SetMaxConnsPerHost(*cfg.MaxConnsPerHost)
+					}
+					if cfg.DisableCompression != nil && *cfg.DisableCompression {
+						cli.DisableCompression()
+					}
+					if cfg.DisableHTTP3 != nil && *cfg.DisableHTTP3 {
+						cli.DisableHTTP3()
+					}
+					if cfg.DisableH2C != nil && *cfg.DisableH2C {
+						cli.DisableH2C()
+					}
 				}
 				ch := make(chan *Command, 1000)
 				client := &Client{Client: cli, reqCh: ch}
-                go request(client)
+				var i uint
+				for i = 0; i < nWorkers; i++ {
+					go request(client)
+				}
 				clients[client_idx] = client
 				rsp := strconv.FormatUint(client_idx, 10)
 				C.ngx_http_lua_ffi_respond(task, 0, (*C.char)(C.CString(rsp)), C.int(len(rsp)))
@@ -341,19 +393,11 @@ func libffi_init(_ *C.char, tq unsafe.Pointer) C.int {
 			case REQUEST:
 				idx := *cmd.Client
 				client := clients[idx]
-			try_worker_loop:
-				for {
-					select {
-					case client.reqCh <- &cmd:
-						break try_worker_loop
-					default:
-						ch := make(chan bool)
-						go func() {
-							close(ch)
-							request(client)
-						}()
-						<-ch
-					}
+				if len(client.reqCh) > 100 {
+					log.Println("all request workers busy, send request directly")
+					go handle_request(client, &cmd)
+				} else {
+					client.reqCh <- &cmd
 				}
 			case WRITE_REQ_BODY:
 				idx1 := *cmd.Client

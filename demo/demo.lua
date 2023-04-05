@@ -56,19 +56,29 @@ function _M.body_reader()
 end
 
 function _M.benchmark_get()
-    local url = "http://httpbin.local/get"
+    local urls = {
+        http = "http://foo.bar:8080/ip",
+        https = "https://foo.bar:9443/ip",
+        http2 = "https://foo.bar:8443/ip",
+        http3 = "https://foo.bar:8443/ip?http3=true",
+    }
+
+    local url = ngx.var.arg_proto and urls[ngx.var.arg_proto] or urls.http
     local cnt = ngx.var.arg_cnt or 10000
 
     -- lua-resty-ffi-req
-
     local client, err = req:new_client()
     local cmd = {
         url = url,
     }
     ngx.update_time()
     local t1 = ngx.now()
-    for _ = 0,cnt do
+    for _ = 1,cnt do
         local ok, res = client:request(cmd)
+        --ngx.say(inspect(ok))
+        --ngx.say(inspect(res))
+        --ngx.flush()
+        --ngx.sleep(0.1)
         assert(ok and res.status == 200)
     end
     ngx.update_time()
@@ -77,14 +87,18 @@ function _M.benchmark_get()
     ngx.flush()
 
     -- lua-resty-http
-
+    if ngx.var.arg_proto == "http3" then
+        url = urls.https
+    end
     local http = require"resty.http"
     local httpc, err = http.new()
     assert(err == nil)
     ngx.update_time()
     local t1 = ngx.now()
-    for _ = 0,cnt do
-        local res, err = httpc:request_uri(url)
+    for _ = 1,cnt do
+        local res, err = httpc:request_uri(url, {ssl_verify=false})
+        --ngx.say(inspect(res))
+        --ngx.say(inspect(err))
         assert(err == nil and res.status == 200)
     end
     ngx.update_time()

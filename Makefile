@@ -5,6 +5,7 @@ INSTALL ?= install
 
 .PHONY: build
 build:
+	goimports -w main.go
 	go build -buildmode=c-shared -o libresty_ffi_req.so main.go
 
 .PHONY: install

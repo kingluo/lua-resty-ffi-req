@@ -29,6 +29,7 @@
 --
 local cjson_encode = require("cjson").encode
 local cjson_decode = require("cjson").decode
+local base64_decode = ngx.decode_base64
 require("resty_ffi")
 local req = ngx.load_ffi("resty_ffi_req")
 
@@ -121,6 +122,9 @@ local meta_client = {
                     }
                     local ok, res = req:get(cjson_encode(cmd))
                     if ok then
+                        if res.body then
+                            res.body = base64_decode(res.body)
+                        end
                         coroutine.yield(res)
                     else
                         local ok = req:close_req(cjson_encode{
@@ -153,6 +157,9 @@ local meta_client = {
                     })
                     assert(ok)
                 end
+            end
+            if ok and res.body then
+                res.body = base64_decode(res.body)
             end
             return ok, res
         end,
